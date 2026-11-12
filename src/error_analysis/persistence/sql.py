@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +81,7 @@ class _ReportAssociationEntity(_Base):
     report_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     class_id: Mapped[int] = mapped_column(ForeignKey("equivalence_class.id"), index=True)
     report_created_at: Mapped[datetime] = mapped_column(_UtcDateTime, index=True)
+    report_version: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
 
 class _InsightEntity(_Base):
@@ -122,16 +124,17 @@ class SqlAnalysisRepository(AnalysisRepository):
         self._tune_sqlite(self._engine)
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False)
         _Base.metadata.create_all(self._engine)
-        self._add_missing_columns()
+        self._upgrade_schema()
 
-    def _add_missing_columns(self) -> None:
+    def _upgrade_schema(self) -> None:
         """
-        Adds columns that the schema defines but an existing database lacks.
+        Adds columns and indexes that the schema defines but an existing database lacks.
 
         Tables that already exist are left untouched by the schema creation, so databases created by
         an earlier version of the schema are brought up to date here. Only nullable columns can be
         added in this manner, which suffices for the columns introduced so far.
         """
+        # add the columns absent from the existing tables
         inspector = inspect(self._engine)
         for table in _Base.metadata.sorted_tables:
             existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
@@ -141,6 +144,12 @@ class SqlAnalysisRepository(AnalysisRepository):
                     log.info("Adding missing column %s.%s to the database schema", table.name, column.name)
                     with self._engine.begin() as connection:
                         connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {column_type}"))
+
+        # create the indexes covering columns that were added after their table's creation
+        with self._engine.begin() as connection:
+            for table in _Base.metadata.sorted_tables:
+                for index in table.indexes:
+                    index.create(connection, checkfirst=True)
 
     @staticmethod
     def _tune_sqlite(engine: Any) -> None:
@@ -193,11 +202,18 @@ class SqlAnalysisRepository(AnalysisRepository):
             session.flush()
             return ClassResolution(equivalence_class=entity.to_record(), created=True)
 
-    def associate(self, report_id: UUID, class_id: int, report_created_at: datetime) -> None:
+    def associate(self, report_id: UUID, class_id: int, report_created_at: datetime, report_version: str | None = None) -> None:
         with self._session_factory.begin() as session:
             # insert the association unless it already exists
             if session.get(_ReportAssociationEntity, str(report_id)) is None:
-                session.add(_ReportAssociationEntity(report_id=str(report_id), class_id=class_id, report_created_at=report_created_at))
+                session.add(
+                    _ReportAssociationEntity(
+                        report_id=str(report_id),
+                        class_id=class_id,
+                        report_created_at=report_created_at,
+                        report_version=report_version,
+                    )
+                )
 
             # widen the class's seen-instant cache to cover the report
             entity = session.get(_EquivalenceClassEntity, class_id)
@@ -231,12 +247,13 @@ class SqlAnalysisRepository(AnalysisRepository):
             entity = session.get(_EquivalenceClassEntity, class_id)
             return entity.to_record() if entity is not None else None
 
-    def list_class_overviews(self, count_since: datetime | None = None) -> list[ClassOverview]:
+    def list_class_overviews(self, count_since: datetime | None = None, version: str | None = None) -> list[ClassOverview]:
         with self._session_factory() as session:
-            report_counts = self._report_counts(session, count_since)
+            report_counts = self._report_counts(session, count_since, version)
             insight_counts = self._insight_counts(session)
 
             # assemble overviews for all classes with a non-zero report count, ordered by count descending
+            restricted = count_since is not None or version is not None
             overviews = [
                 ClassOverview(
                     equivalence_class=entity.to_record(),
@@ -244,9 +261,19 @@ class SqlAnalysisRepository(AnalysisRepository):
                     insight_count=insight_counts.get(entity.id, 0),
                 )
                 for entity in session.scalars(select(_EquivalenceClassEntity)).all()
-                if count_since is None or report_counts.get(entity.id, 0) > 0
+                if not restricted or report_counts.get(entity.id, 0) > 0
             ]
             return sorted(overviews, key=lambda o: o.report_count, reverse=True)
+
+    def list_report_versions(self, since: datetime | None = None) -> list[str]:
+        with self._session_factory() as session:
+            statement = (
+                select(_ReportAssociationEntity.report_version).where(_ReportAssociationEntity.report_version.is_not(None)).distinct()
+            )
+            if since is not None:
+                statement = statement.where(_ReportAssociationEntity.report_created_at > since)
+            versions = [version for version in session.scalars(statement).all() if version is not None]
+            return sorted(versions, key=self._version_sort_key, reverse=True)
 
     def add_insight(self, class_id: int, analyzed_report_id: UUID, markdown: str, author: str | None = None) -> InsightRecord:
         with self._session_factory.begin() as session:
@@ -276,15 +303,18 @@ class SqlAnalysisRepository(AnalysisRepository):
             return [entity.to_record() for entity in session.scalars(statement).all()]
 
     @staticmethod
-    def _report_counts(session: Session, count_since: datetime | None) -> dict[int, int]:
+    def _report_counts(session: Session, count_since: datetime | None, version: str | None = None) -> dict[int, int]:
         """
         :param session: the session to query in
         :param count_since: if given, only reports created after this instant are counted
+        :param version: if given, only reports originating from this deployment version are counted
         :return: a mapping from class identifier to the number of associated reports
         """
         statement: Any = select(_ReportAssociationEntity.class_id, func.count()).group_by(_ReportAssociationEntity.class_id)
         if count_since is not None:
             statement = statement.where(_ReportAssociationEntity.report_created_at > count_since)
+        if version is not None:
+            statement = statement.where(_ReportAssociationEntity.report_version == version)
         return {row[0]: row[1] for row in session.execute(statement)}
 
     @staticmethod
@@ -295,6 +325,15 @@ class SqlAnalysisRepository(AnalysisRepository):
         """
         statement = select(_InsightEntity.class_id, func.count()).group_by(_InsightEntity.class_id)
         return {row[0]: row[1] for row in session.execute(statement)}
+
+    @staticmethod
+    def _version_sort_key(version: str) -> list[tuple[int, int | str]]:
+        """
+        :param version: the version designation to derive a sort key from
+        :return: a key ordering version designations naturally, i.e. comparing embedded numbers
+            numerically rather than lexicographically (2.10.0 thus ranking above 2.9.1)
+        """
+        return [(0, int(part)) if part.isdigit() else (1, part) for part in re.split(r"(\d+)", version) if part]
 
     @staticmethod
     def _as_utc(instant: datetime) -> datetime:
