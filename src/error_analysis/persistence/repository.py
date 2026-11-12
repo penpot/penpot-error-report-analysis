@@ -8,7 +8,13 @@ from datetime import datetime
 from uuid import UUID
 
 from error_analysis.fingerprint.algorithm import Fingerprint
-from error_analysis.persistence.records import ClassOverview, ClassResolution, EquivalenceClassRecord, InsightRecord
+from error_analysis.persistence.records import (
+    ClassOverview,
+    ClassResolution,
+    ClassTriage,
+    EquivalenceClassRecord,
+    InsightRecord,
+)
 
 
 class AnalysisRepository(ABC):
@@ -104,12 +110,12 @@ class AnalysisRepository(ABC):
         """
 
     @abstractmethod
-    def set_issue_number(self, class_id: int, issue_number: int | None) -> EquivalenceClassRecord:
+    def set_triage(self, class_id: int, triage: ClassTriage) -> EquivalenceClassRecord:
         """
-        Records the number of the GitHub issue filed for the given equivalence class.
+        Records the triage state of the given equivalence class, replacing the state recorded so far.
 
         :param class_id: the identifier of the equivalence class
-        :param issue_number: the issue number; ``None`` to remove a previously recorded number
+        :param triage: the triage state to record
         :return: the updated equivalence class
         :raises KeyError: if no class with the given identifier exists
         """

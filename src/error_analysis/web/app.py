@@ -12,9 +12,65 @@ from flask import Flask, Response, jsonify, request
 
 from error_analysis.context import AnalysisContext
 from error_analysis.logging_config import configure_logging
+from error_analysis.persistence.records import ClassTriage, Severity
 from error_analysis.serialization import JsonSerializer
 
 log = logging.getLogger(__name__)
+
+
+class _TriageParser:
+    """
+    Parses the triage state from a request payload.
+
+    The payload carries the complete state (severity, issue number, pull request number, fixed flag);
+    absent or ``null`` entries denote the unset value of the respective field.
+    """
+
+    def parse(self, payload: dict[str, Any]) -> ClassTriage:
+        """
+        :param payload: the decoded request body
+        :return: the triage state it describes
+        :raises ValueError: if an entry is of the wrong type or carries an unknown value
+        """
+        return ClassTriage(
+            severity=self._parse_severity(payload.get("severity")),
+            issue_number=self._parse_number(payload.get("issue_number"), "issue_number"),
+            pr_number=self._parse_number(payload.get("pr_number"), "pr_number"),
+            fixed=bool(payload.get("fixed", False)),
+        )
+
+    @staticmethod
+    def _parse_severity(value: Any) -> Severity | None:
+        """
+        :param value: the payload's severity entry
+        :return: the severity, or ``None`` if none is assigned
+        :raises ValueError: if the value is not one of the known severities
+        """
+        if value is None or value == "":
+            return None
+        try:
+            return Severity(value)
+        except ValueError as e:
+            known = ", ".join(s.value for s in Severity)
+            raise ValueError(f"'severity' must be one of [{known}] or null") from e
+
+    @staticmethod
+    def _parse_number(value: Any, field: str) -> int | None:
+        """
+        :param value: the payload's entry
+        :param field: the name of the entry, for error reporting
+        :return: the positive number, or ``None`` if none is recorded
+        :raises ValueError: if the value is neither a positive integer nor null
+        """
+        if value is None or value == "":
+            return None
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"'{field}' must be a positive integer or null") from e
+        if number <= 0:
+            raise ValueError(f"'{field}' must be a positive integer or null")
+        return number
 
 
 class WebBackend:
@@ -22,7 +78,8 @@ class WebBackend:
     The web application of the analysis platform.
 
     Serves the static dashboard at the root path and provides the JSON endpoints the dashboard
-    consumes: class overviews, class details (with insights and members), and report details.
+    consumes: class overviews, class details (with insights and members), report details, as well as
+    the recording of triage state.
     """
 
     _DEFAULT_WINDOW_DAYS = 30
@@ -36,6 +93,7 @@ class WebBackend:
         :param context: the platform services the endpoints operate on
         """
         self._context = context
+        self._triage_parser = _TriageParser()
         self._app = Flask(__name__)
         self._register_routes()
 
@@ -54,7 +112,7 @@ class WebBackend:
         self._app.add_url_rule("/api/classes", view_func=self._list_classes)
         self._app.add_url_rule("/api/versions", view_func=self._list_versions)
         self._app.add_url_rule("/api/classes/<int:class_id>", view_func=self._get_class)
-        self._app.add_url_rule("/api/classes/<int:class_id>/issue", view_func=self._set_issue_number, methods=["PUT"])
+        self._app.add_url_rule("/api/classes/<int:class_id>/triage", view_func=self._set_triage, methods=["PUT"])
         self._app.add_url_rule("/api/classes/<int:class_id>/insights/<int:insight_id>/issue-draft", view_func=self._get_issue_draft)
         self._app.add_url_rule("/api/reports/<report_id>", view_func=self._get_report)
 
@@ -108,27 +166,20 @@ class WebBackend:
             }
         )
 
-    def _set_issue_number(self, class_id: int) -> Any:
+    def _set_triage(self, class_id: int) -> Any:
         """
-        Records the number of the GitHub issue filed for an equivalence class, as given by the
-        request body's ``issue_number`` entry (``null`` removing a previously recorded number).
+        Records the triage state of an equivalence class (severity, issue number, pull request
+        number, fixed flag), as given in full by the request body.
         """
-        # extract and validate the issue number
-        payload = request.get_json(silent=True) or {}
-        raw_number = payload.get("issue_number")
-        if raw_number is None:
-            issue_number = None
-        else:
-            try:
-                issue_number = int(raw_number)
-            except (TypeError, ValueError):
-                return jsonify({"error": "'issue_number' must be an integer or null"}), 400
-            if issue_number <= 0:
-                return jsonify({"error": "'issue_number' must be positive"}), 400
+        # parse the submitted state
+        try:
+            triage = self._triage_parser.parse(request.get_json(silent=True) or {})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
         # record it
         try:
-            record = self._context.repository.set_issue_number(class_id, issue_number)
+            record = self._context.repository.set_triage(class_id, triage)
         except KeyError:
             return jsonify({"error": f"no equivalence class with id {class_id}"}), 404
         return jsonify(JsonSerializer.equivalence_class(record))
