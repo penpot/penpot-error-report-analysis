@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
+error-analysis-backfill = "error_analysis.backfill.cli:main"
 error-analysis-classify = "error_analysis.classify.cli:main"
 error-analysis-mcp = "error_analysis.mcp.server:main"
 error-analysis-web = "error_analysis.web.app:main"
