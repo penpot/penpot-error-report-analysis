@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from error_analysis.mcp.tools_base import Tool, ToolCallError
-from error_analysis.persistence.records import ClassOverview
+from error_analysis.persistence.records import ClassOverview, Severity
 from error_analysis.persistence.repository import AnalysisRepository
 from error_analysis.serialization import JsonSerializer
 
@@ -18,6 +19,18 @@ def _unanalyzed_overviews(repository: AnalysisRepository, since: datetime) -> li
         count descending
     """
     return [o for o in repository.list_class_overviews(count_since=since) if o.insight_count == 0]
+
+
+def _parse_severity(value: str) -> Severity:
+    """
+    :param value: the severity name to parse
+    :return: the parsed severity
+    :raises ToolCallError: if the value does not name a known severity
+    """
+    try:
+        return Severity(value.strip().lower())
+    except ValueError as e:
+        raise ToolCallError(f"Invalid severity '{value}': must be one of {[s.value for s in Severity]}") from e
 
 
 _BOOTSTRAP_INSTRUCTIONS = """\
@@ -35,10 +48,12 @@ You are to analyze Penpot error report equivalence classes. For each class liste
    (symbol search, memories, REPL evaluation, git history).
 4. Write a markdown report with the sections: Summary, Root Cause, Evidence, Affected Code,
    Suggested Fix, Severity. If the analysis remains inconclusive, report your findings and open questions instead.
-5. Store the report via store_insight (passing the id of the report instance you analyzed and your model name as author).
+5. Store the report via store_insight (passing the id of the report instance you analyzed, your model name as
+   author, and the severity you assessed).
 Then continue with the next class. Do not skip storing an insight for an analyzed class.
 Filing GitHub issues is not part of this workflow; should the user explicitly ask for it (and a candidate's
-'issue_number' be absent, i.e. no issue filed yet), record the number of the issue you filed via set_issue_number."""
+'triage.issue_number' be absent, i.e. no issue filed yet), record the number of the issue you filed via
+set_class_triage."""
 
 
 class BootstrapAnalysisTool(Tool):
@@ -262,52 +277,33 @@ class GetReportDetailsTool(Tool):
         return self._to_json(JsonSerializer.report(report))
 
 
-class SetIssueNumberTool(Tool):
-    """
-    Records the GitHub issue filed for an equivalence class.
-    """
-
-    def apply(self, class_id: int, issue_number: int) -> str:
-        """
-        Records the number of the GitHub issue that was filed for an equivalence class, such that the
-        issue is linked in the dashboard and the class is recognizable as filed. Call this only for an
-        issue that actually exists, i.e. after having filed it or when the user provides its number.
-
-        :param class_id: the id of the equivalence class the issue pertains to
-        :param issue_number: the number of the GitHub issue
-        :return: a JSON object describing the updated equivalence class
-        """
-        # validate the issue number
-        if issue_number <= 0:
-            raise ToolCallError(f"Invalid issue number {issue_number}: must be positive")
-
-        # record it
-        try:
-            record = self._context.repository.set_issue_number(class_id, issue_number)
-        except KeyError as e:
-            raise ToolCallError(f"No equivalence class with id {class_id} exists") from e
-        return self._to_json(JsonSerializer.equivalence_class(record))
-
-
 class StoreInsightTool(Tool):
     """
     Stores an analysis insight.
     """
 
-    def apply(self, class_id: int, analyzed_report_id: str, markdown: str, author: str = "") -> str:
+    def apply(self, class_id: int, analyzed_report_id: str, markdown: str, author: str = "", severity: str = "") -> str:
         """
-        Stores a markdown analysis report as an insight for an equivalence class.
+        Stores a markdown analysis report as an insight for an equivalence class, optionally recording
+        the severity you assessed on the class itself.
 
         :param class_id: the id of the equivalence class the insight pertains to
         :param analyzed_report_id: the id (UUID) of the concrete report instance that was analyzed
         :param markdown: the analysis report in markdown format (sections: Summary, Root Cause, Evidence,
             Affected Code, Suggested Fix, Severity)
         :param author: the author of the insight, e.g. the analyzing LLM's model name
+        :param severity: the assessed severity of the underlying defect: one of critical, high, medium, low;
+            leave empty to keep the severity recorded so far
         :return: a JSON object describing the stored insight
         """
         # validate the referenced class
-        if self._context.repository.get_class(class_id) is None:
+        record = self._context.repository.get_class(class_id)
+        if record is None:
             raise ToolCallError(f"No equivalence class with id {class_id} exists")
+
+        # record the assessed severity on the class, retaining the remaining triage state
+        if severity:
+            self._context.repository.set_triage(class_id, replace(record.triage, severity=_parse_severity(severity)))
 
         # store the insight
         insight = self._context.repository.add_insight(
@@ -317,3 +313,51 @@ class StoreInsightTool(Tool):
             author=author or None,
         )
         return self._to_json(JsonSerializer.insight(insight))
+
+
+class SetClassTriageTool(Tool):
+    """
+    Records the triage state of an equivalence class.
+    """
+
+    def apply(
+        self,
+        class_id: int,
+        severity: str = "",
+        issue_number: int | None = None,
+        pr_number: int | None = None,
+        fixed: bool | None = None,
+    ) -> str:
+        """
+        Records the triage state of an equivalence class: the assessed severity of the underlying defect,
+        the numbers of the GitHub issue and the pull request addressing it, and whether it is fixed.
+        Only the arguments you pass take effect; the state recorded so far is retained otherwise.
+
+        :param class_id: the id of the equivalence class
+        :param severity: the assessed severity: one of critical, high, medium, low; pass 'none' to remove
+            the assessment
+        :param issue_number: the number of the GitHub issue filed for the class; pass 0 to remove the
+            recorded number
+        :param pr_number: the number of the pull request addressing the class; pass 0 to remove the
+            recorded number
+        :param fixed: whether the underlying defect has been fixed; note that the reports of a fixed defect
+            keep appearing in time windows that precede the fix
+        :return: a JSON object describing the class with its updated triage state
+        """
+        # validate the referenced class
+        record = self._context.repository.get_class(class_id)
+        if record is None:
+            raise ToolCallError(f"No equivalence class with id {class_id} exists")
+
+        # apply the given modifications to the triage state recorded so far
+        triage = record.triage
+        if severity:
+            triage = replace(triage, severity=None if severity.strip().lower() == "none" else _parse_severity(severity))
+        if issue_number is not None:
+            triage = replace(triage, issue_number=issue_number or None)
+        if pr_number is not None:
+            triage = replace(triage, pr_number=pr_number or None)
+        if fixed is not None:
+            triage = replace(triage, fixed=fixed)
+
+        return self._to_json(JsonSerializer.equivalence_class(self._context.repository.set_triage(class_id, triage)))

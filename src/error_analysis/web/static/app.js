@@ -2,7 +2,7 @@
  * Penpot error report analysis dashboard.
  *
  * Object-oriented structure: ApiClient (server communication), ClassListView (left pane),
- * ClassDetailView (right pane), ReportOverlay (member report inspection), App (wiring).
+ * ClassDetailView (right pane) with TriagePanel, ReportOverlay (member report inspection), App (wiring).
  */
 "use strict";
 
@@ -32,7 +32,7 @@ class ApiClient {
 
     /**
      * @param {number} classId the id of the equivalence class
-     * @returns {Promise<Object>} the class details (class, insights, members)
+     * @returns {Promise<Object>} the class details (class, triage, insights, members)
      */
     getClass(classId) {
         return $.getJSON(`api/classes/${classId}`);
@@ -49,7 +49,7 @@ class ApiClient {
     /**
      * @param {number} classId the id of the equivalence class
      * @param {number} insightId the id of the insight to file as an issue
-     * @returns {Promise<Object>} the issue draft (title, body, prefill_url, new_issue_url)
+     * @returns {Promise<Object>} the issue draft (title, body, form_url)
      */
     getIssueDraft(classId, insightId) {
         return $.getJSON(`api/classes/${classId}/insights/${insightId}/issue-draft`);
@@ -57,15 +57,25 @@ class ApiClient {
 
     /**
      * @param {number} classId the id of the equivalence class
-     * @param {?number} issueNumber the number of the filed GitHub issue; null to remove it
+     * @param {Object} triage the complete triage state (severity, issue_number, pr_number, fixed)
      * @returns {Promise<Object>} the updated equivalence class
      */
-    setIssueNumber(classId, issueNumber) {
+    setTriage(classId, triage) {
+        return this._send(`api/classes/${classId}/triage`, "PUT", triage);
+    }
+
+    /**
+     * @param {string} url the endpoint URL
+     * @param {string} method the HTTP method
+     * @param {Object} payload the request body
+     * @returns {Promise<Object>} the decoded response
+     */
+    _send(url, method, payload) {
         return $.ajax({
-            url: `api/classes/${classId}/issue`,
-            method: "PUT",
+            url: url,
+            method: method,
             contentType: "application/json",
-            data: JSON.stringify({ issue_number: issueNumber }),
+            data: JSON.stringify(payload),
             dataType: "json",
         });
     }
@@ -88,6 +98,41 @@ class Clipboard {
             $area.remove();
             succeeded ? resolve() : reject(new Error("copy failed"));
         });
+    }
+}
+
+/** The severities a class can be assigned, and the badges conveying triage state. */
+class Triage {
+    /** @returns {Array<string>} the severity values, most severe first */
+    static severities() {
+        return ["critical", "high", "medium", "low"];
+    }
+
+    /**
+     * @param {?string} severity the assigned severity, if any
+     * @returns {jQuery} the badge conveying the severity, or a placeholder if none is assigned
+     */
+    static severityBadge(severity) {
+        if (!severity) return $("<span>").addClass("muted").text("—");
+        return $("<span>").addClass(`badge severity-${severity}`).text(severity);
+    }
+
+    /**
+     * @param {Object} overview the class overview
+     * @returns {Array<jQuery>} the badges conveying the analysis and resolution state of the class
+     */
+    static statusBadges(overview) {
+        const triage = overview.triage;
+        const badges = [];
+        if (overview.insight_count > 0) {
+            badges.push($("<span>").addClass("badge done").text(`${overview.insight_count} insight${overview.insight_count > 1 ? "s" : ""}`));
+        } else {
+            badges.push($("<span>").addClass("badge pending").text("pending"));
+        }
+        if (triage.issue_number) badges.push($("<span>").addClass("badge issue").text(`#${triage.issue_number}`));
+        if (triage.pr_number) badges.push($("<span>").addClass("badge pr").text(`PR #${triage.pr_number}`));
+        if (triage.fixed) badges.push($("<span>").addClass("badge fixed").text("fixed"));
+        return badges;
     }
 }
 
@@ -131,20 +176,115 @@ class ClassListView {
      * @returns {jQuery} the table row
      */
     _buildRow(overview) {
-        const analyzed = overview.insight_count > 0;
-        const $status = $("<span>")
-            .addClass("badge")
-            .addClass(analyzed ? "done" : "pending")
-            .text(analyzed ? `${overview.insight_count} insight${overview.insight_count > 1 ? "s" : ""}` : "pending");
         const $row = $("<tr>")
             .attr("data-class-id", overview.id)
+            .toggleClass("resolved", overview.triage.fixed)
             .append($("<td>").addClass("col-id").text(overview.id))
             .append($("<td>").addClass("hint-cell").text(overview.exemplar_hint || "(no hint)"))
             .append($("<td>").addClass("col-num").text(overview.report_count))
+            .append($("<td>").addClass("col-severity").append(Triage.severityBadge(overview.triage.severity)))
             .append($("<td>").addClass("col-date").text(Formats.date(overview.last_seen_at)))
-            .append($("<td>").addClass("col-status").append($status));
+            .append($("<td>").addClass("col-status").append(Triage.statusBadges(overview)));
         $row.on("click", () => this._onSelect(overview.id));
         return $row;
+    }
+}
+
+/**
+ * Renders the triage controls of a class: the assessed severity, the linked GitHub issue and pull
+ * request, and the fixed marker.
+ *
+ * Each control edit submits the complete triage state, which the panel holds for the displayed class.
+ */
+class TriagePanel {
+    /**
+     * @param {ApiClient} api the client used to record the triage state
+     * @param {function(): void} onChanged invoked once a modification has been recorded
+     */
+    constructor(api, onChanged) {
+        this._api = api;
+        this._onChanged = onChanged;
+        this._classId = null;
+        this._triage = null;
+    }
+
+    /**
+     * @param {Object} detail the class details
+     * @returns {jQuery} the triage panel
+     */
+    render(detail) {
+        this._classId = detail.id;
+        this._triage = detail.triage;
+        return $("<div>").addClass("triage-panel")
+            .append(this._buildSeverityControl())
+            .append(this._buildNumberControl("Issue", "issue_number", "issues"))
+            .append(this._buildNumberControl("PR", "pr_number", "pull"))
+            .append(this._buildFixedControl());
+    }
+
+    /** @returns {jQuery} the severity selector */
+    _buildSeverityControl() {
+        const $select = $("<select>").append($("<option>").attr("value", "").text("unassessed"));
+        Triage.severities().forEach((severity) => $select.append($("<option>").attr("value", severity).text(severity)));
+        $select.val(this._triage.severity || "");
+        $select.on("change", () => this._store({ severity: $select.val() || null }));
+        return this._control("Severity", $select);
+    }
+
+    /**
+     * @param {string} label the label of the control
+     * @param {string} field the triage field holding the number
+     * @param {string} urlSegment the GitHub URL segment the number is linked under
+     * @returns {jQuery} the control displaying the linked number, or capturing one if none is linked
+     */
+    _buildNumberControl(label, field, urlSegment) {
+        const number = this._triage[field];
+        if (number) {
+            const $link = $("<a>")
+                .attr({ href: `https://github.com/penpot/penpot/${urlSegment}/${number}`, target: "_blank", rel: "noopener" })
+                .text(`#${number}`);
+            const $unlink = $("<button>").attr("type", "button").addClass("link-button").attr("title", `Unlink ${label.toLowerCase()}`)
+                .text("×")
+                .on("click", () => this._store({ [field]: null }));
+            return this._control(label, $link, $unlink);
+        }
+        const $input = $("<input>").attr({ type: "number", min: "1", placeholder: "#" });
+        const submit = () => {
+            const value = parseInt($input.val(), 10);
+            if (value > 0) this._store({ [field]: value });
+        };
+        $input.on("keydown", (event) => {
+            if (event.key === "Enter") submit();
+        });
+        return this._control(label, $input, $("<button>").attr("type", "button").text("Link").on("click", submit));
+    }
+
+    /** @returns {jQuery} the checkbox marking the underlying defect as fixed */
+    _buildFixedControl() {
+        const $checkbox = $("<input>").attr("type", "checkbox").prop("checked", this._triage.fixed)
+            .on("change", () => this._store({ fixed: $checkbox.prop("checked") }));
+        const $label = $("<label>").addClass("fixed-control")
+            .append($checkbox)
+            .append($("<span>").text("Fixed"))
+            .attr("title", "Mark as fixed; reports of older windows keep showing up");
+        return $("<div>").addClass("triage-control").append($label);
+    }
+
+    /**
+     * @param {string} label the label of the control
+     * @param {...jQuery} $parts the elements forming the control
+     * @returns {jQuery} the labeled control
+     */
+    _control(label, ...$parts) {
+        return $("<div>").addClass("triage-control").append($("<span>").addClass("triage-label").text(label)).append($parts);
+    }
+
+    /**
+     * Records the triage state with the given fields replaced.
+     * @param {Object} changes the triage fields to change
+     */
+    _store(changes) {
+        this._api.setTriage(this._classId, Object.assign({}, this._triage, changes)).then(() => this._onChanged());
     }
 }
 
@@ -152,7 +292,7 @@ class ClassListView {
 class ClassDetailView {
     /**
      * @param {jQuery} $pane the pane to render into
-     * @param {ApiClient} api the client used to load issue drafts and record issue numbers
+     * @param {ApiClient} api the client used to load issue drafts and record modifications
      * @param {function(string): void} onReportOpen invoked with the report id when a member is opened
      * @param {function(): void} onClassChanged invoked when the displayed class was modified
      */
@@ -160,12 +300,12 @@ class ClassDetailView {
         this._$pane = $pane;
         this._api = api;
         this._onReportOpen = onReportOpen;
-        this._onClassChanged = onClassChanged;
+        this._triagePanel = new TriagePanel(api, onClassChanged);
     }
 
     /**
      * Renders the given class details.
-     * @param {Object} detail the class details (class fields, insights, members)
+     * @param {Object} detail the class details (class fields, triage, insights, members)
      */
     render(detail) {
         this._$pane.empty();
@@ -178,7 +318,7 @@ class ClassDetailView {
 
     /**
      * @param {Object} detail the class details
-     * @returns {jQuery} the header element (hint title and metadata line)
+     * @returns {jQuery} the header element (hint title, metadata line, and triage panel)
      */
     _buildHeader(detail) {
         const $meta = $("<div>").addClass("detail-meta")
@@ -190,41 +330,7 @@ class ClassDetailView {
         return $("<div>").addClass("detail-header")
             .append($("<h2>").text(detail.exemplar_hint || "(no hint)"))
             .append($meta)
-            .append(this._buildIssueTracker(detail));
-    }
-
-    /**
-     * @param {Object} detail the class details
-     * @returns {jQuery} the control displaying or capturing the number of the filed GitHub issue
-     */
-    _buildIssueTracker(detail) {
-        const $tracker = $("<div>").addClass("issue-tracker");
-        if (detail.issue_number) {
-            const $link = $("<a>")
-                .attr("href", `https://github.com/penpot/penpot/issues/${detail.issue_number}`)
-                .attr("target", "_blank")
-                .attr("rel", "noopener")
-                .text(`Issue #${detail.issue_number}`);
-            const $remove = $("<button>").attr("type", "button").text("Unlink")
-                .on("click", () => this._storeIssueNumber(detail.id, null));
-            return $tracker.addClass("filed").append($("<span>").addClass("badge done").text("filed")).append($link).append($remove);
-        }
-        const $input = $("<input>").attr({ type: "number", min: "1", placeholder: "issue #" });
-        const $save = $("<button>").attr("type", "button").text("Link issue")
-            .on("click", () => {
-                const value = parseInt($input.val(), 10);
-                if (value > 0) this._storeIssueNumber(detail.id, value);
-            });
-        return $tracker.append($("<span>").addClass("muted").text("No issue linked")).append($input).append($save);
-    }
-
-    /**
-     * Records the given issue number for the given class and refreshes the display.
-     * @param {number} classId the id of the equivalence class
-     * @param {?number} issueNumber the issue number, or null to remove it
-     */
-    _storeIssueNumber(classId, issueNumber) {
-        this._api.setIssueNumber(classId, issueNumber).then(() => this._onClassChanged());
+            .append(this._triagePanel.render(detail));
     }
 
     /**
@@ -516,10 +622,11 @@ class App {
         this._api.getClass(classId).then((detail) => this._detailView.render(detail));
     }
 
-    /** Reloads the currently selected class, reflecting modifications made to it. */
+    /** Reloads the currently selected class and the list, reflecting modifications made to the class. */
     _refreshSelectedClass() {
         if (this._selectedClassId !== null) {
             this._selectClass(this._selectedClassId);
+            this._loadClasses();
         }
     }
 

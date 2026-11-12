@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from error_analysis.persistence.records import ClassOverview, EquivalenceClassRecord, InsightRecord
+from error_analysis.persistence.records import ClassOverview, ClassTriage, EquivalenceClassRecord, InsightRecord
 from error_analysis.reports.model import BackendErrorReport, ErrorReport, FrontendErrorReport
 
 
@@ -17,7 +17,20 @@ class JsonSerializer:
     """
 
     @staticmethod
-    def equivalence_class(record: EquivalenceClassRecord) -> dict[str, Any]:
+    def triage(triage: ClassTriage) -> dict[str, Any]:
+        """
+        :param triage: the triage state to serialize
+        :return: the JSON-compatible representation
+        """
+        return {
+            "severity": triage.severity.value if triage.severity is not None else None,
+            "issue_number": triage.issue_number,
+            "pr_number": triage.pr_number,
+            "fixed": triage.fixed,
+        }
+
+    @classmethod
+    def equivalence_class(cls, record: EquivalenceClassRecord) -> dict[str, Any]:
         """
         :param record: the equivalence class to serialize
         :return: the JSON-compatible representation
@@ -30,7 +43,7 @@ class JsonSerializer:
             "exemplar_hint": record.exemplar_hint,
             "first_seen_at": record.first_seen_at.isoformat(),
             "last_seen_at": record.last_seen_at.isoformat(),
-            "issue_number": record.issue_number,
+            "triage": cls.triage(record.triage),
         }
 
     @classmethod

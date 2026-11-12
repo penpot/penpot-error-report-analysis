@@ -49,6 +49,10 @@ which the LLM presents to the user, who decides how many (or which) classes shal
 The chosen classes are then retrieved in full detail via `get_analysis_candidates`, 
 which also delivers the analysis workflow instructions. 
 
+Beyond analysis, the classes themselves can be curated through the MCP server: `set_class_triage`
+records a class's severity, the numbers of the GitHub issue and the pull request addressing it, and
+the *fixed* marker (only the given properties change).
+
 > [!IMPORTANT]
 > The analyzing LLM should additionally have access to the 
 > [*agentic Penpot development environment*](https://help.penpot.app/technical-guide/developer/agentic-devenv/) 
@@ -72,6 +76,11 @@ Subsequent `bootstrap_analysis` calls then only classify reports that arrived si
 serves the dashboard at http://127.0.0.1:5100. The dashboard lists the equivalence classes of a
 selectable time window, optionally restricted to a single deployment version, and provides per-class
 fingerprint signatures, analysis insights, and member report inspection.
+
+Each class carries a triage state that is curated in the dashboard: the assessed severity (shown as
+a column of the class list), the numbers of the GitHub issue and the pull request addressing it, and
+a *fixed* marker for defects that are resolved but keep appearing in reports of older windows. The
+severity is equally assigned by the analyzing LLM via the `store_insight` and `set_class_triage` tools.
 
 ## Development
 

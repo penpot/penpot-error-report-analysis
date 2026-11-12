@@ -23,7 +23,7 @@ from error_analysis.mcp.tools import (
     GetEquivalenceClassTool,
     GetReportDetailsTool,
     ListClassOverviewsTool,
-    SetIssueNumberTool,
+    SetClassTriageTool,
     StoreInsightTool,
 )
 from error_analysis.mcp.tools_base import Tool, ToolCallError
@@ -35,7 +35,9 @@ This server provides access to the Penpot error report analysis platform. Error 
 into equivalence classes (one class per underlying issue); the platform stores class associations and
 analysis insights. To perform an analysis session, call bootstrap_analysis once and follow the
 instructions it returns: it provides an overview of the unanalyzed classes, upon which the user decides
-what shall be analyzed; the chosen classes are then retrieved via get_analysis_candidates."""
+what shall be analyzed; the chosen classes are then retrieved via get_analysis_candidates.
+Beyond analysis, the triage state of the classes (severity, GitHub issue and pull request numbers,
+fixed marker) is recorded via set_class_triage."""
 
 _TOOL_CLASSES: list[type[Tool]] = [
     BootstrapAnalysisTool,
@@ -44,7 +46,7 @@ _TOOL_CLASSES: list[type[Tool]] = [
     GetEquivalenceClassTool,
     GetReportDetailsTool,
     StoreInsightTool,
-    SetIssueNumberTool,
+    SetClassTriageTool,
 ]
 
 

@@ -4,7 +4,40 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from uuid import UUID
+
+
+class Severity(Enum):
+    """
+    The assessed severity of the defect underlying an equivalence class.
+    """
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+@dataclass(frozen=True)
+class ClassTriage:
+    """
+    The curated triage state of an equivalence class: the assessed severity and the progress of the
+    underlying defect's resolution.
+
+    The resolution markers are independent of one another: a pull request may exist without a filed
+    issue, and a class may be marked as fixed while its reports keep appearing in older time windows.
+
+    :ivar severity: the assessed severity, if one has been assigned
+    :ivar issue_number: the number of the GitHub issue filed for the class, if any
+    :ivar pr_number: the number of the pull request addressing the class, if any
+    :ivar fixed: whether the underlying defect has been fixed
+    """
+
+    severity: Severity | None = None
+    issue_number: int | None = None
+    pr_number: int | None = None
+    fixed: bool = False
 
 
 @dataclass(frozen=True)
@@ -19,7 +52,7 @@ class EquivalenceClassRecord:
     :ivar exemplar_hint: the raw hint of one member report, cached for display purposes
     :ivar first_seen_at: the creation instant of the oldest associated report
     :ivar last_seen_at: the creation instant of the newest associated report
-    :ivar issue_number: the number of the GitHub issue filed for the class, if any
+    :ivar triage: the curated triage state of the class
     """
 
     id: int
@@ -29,7 +62,7 @@ class EquivalenceClassRecord:
     exemplar_hint: str
     first_seen_at: datetime
     last_seen_at: datetime
-    issue_number: int | None = None
+    triage: ClassTriage = ClassTriage()
 
 
 @dataclass(frozen=True)

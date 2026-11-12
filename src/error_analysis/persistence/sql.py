@@ -10,13 +10,20 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, create_engine, event, func, inspect, select, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, event, func, inspect, select, text
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
 from error_analysis.fingerprint.algorithm import Fingerprint
-from error_analysis.persistence.records import ClassOverview, ClassResolution, EquivalenceClassRecord, InsightRecord
+from error_analysis.persistence.records import (
+    ClassOverview,
+    ClassResolution,
+    ClassTriage,
+    EquivalenceClassRecord,
+    InsightRecord,
+    Severity,
+)
 from error_analysis.persistence.repository import AnalysisRepository
 
 log = logging.getLogger(__name__)
@@ -61,6 +68,9 @@ class _EquivalenceClassEntity(_Base):
     first_seen_at: Mapped[datetime] = mapped_column(_UtcDateTime)
     last_seen_at: Mapped[datetime] = mapped_column(_UtcDateTime)
     issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    fixed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     def to_record(self) -> EquivalenceClassRecord:
         return EquivalenceClassRecord(
@@ -71,8 +81,24 @@ class _EquivalenceClassEntity(_Base):
             exemplar_hint=self.exemplar_hint,
             first_seen_at=self.first_seen_at,
             last_seen_at=self.last_seen_at,
-            issue_number=self.issue_number,
+            triage=ClassTriage(
+                severity=Severity(self.severity) if self.severity else None,
+                issue_number=self.issue_number,
+                pr_number=self.pr_number,
+                fixed=bool(self.fixed),
+            ),
         )
+
+    def apply_triage(self, triage: ClassTriage) -> None:
+        """
+        Writes the given triage state to the entity's columns.
+
+        :param triage: the triage state to apply
+        """
+        self.severity = triage.severity.value if triage.severity is not None else None
+        self.issue_number = triage.issue_number
+        self.pr_number = triage.pr_number
+        self.fixed = triage.fixed
 
 
 class _ReportAssociationEntity(_Base):
@@ -288,12 +314,12 @@ class SqlAnalysisRepository(AnalysisRepository):
             session.flush()
             return entity.to_record()
 
-    def set_issue_number(self, class_id: int, issue_number: int | None) -> EquivalenceClassRecord:
+    def set_triage(self, class_id: int, triage: ClassTriage) -> EquivalenceClassRecord:
         with self._session_factory.begin() as session:
             entity = session.get(_EquivalenceClassEntity, class_id)
             if entity is None:
                 raise KeyError(f"No equivalence class with id {class_id}")
-            entity.issue_number = issue_number
+            entity.apply_triage(triage)
             session.flush()
             return entity.to_record()
 
