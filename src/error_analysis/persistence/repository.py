@@ -30,7 +30,7 @@ class AnalysisRepository(ABC):
         """
 
     @abstractmethod
-    def associate(self, report_id: UUID, class_id: int, report_created_at: datetime) -> None:
+    def associate(self, report_id: UUID, class_id: int, report_created_at: datetime, report_version: str | None = None) -> None:
         """
         Associates the given report with the given equivalence class, updating the class's
         first/last-seen instants accordingly. The operation is idempotent.
@@ -38,6 +38,7 @@ class AnalysisRepository(ABC):
         :param report_id: the identifier of the report
         :param class_id: the identifier of the equivalence class
         :param report_created_at: the creation instant of the report
+        :param report_version: the deployment version the report originates from, if known
         """
 
     @abstractmethod
@@ -68,13 +69,26 @@ class AnalysisRepository(ABC):
         """
 
     @abstractmethod
-    def list_class_overviews(self, count_since: datetime | None = None) -> list[ClassOverview]:
+    def list_class_overviews(self, count_since: datetime | None = None, version: str | None = None) -> list[ClassOverview]:
         """
         Retrieves all equivalence classes together with aggregate statistics, ordered by report count descending.
 
         :param count_since: if given, only reports created after this instant contribute to the report counts,
             and classes without any such report are omitted
+        :param version: if given, only reports originating from this deployment version contribute to the
+            report counts, and classes without any such report are omitted
         :return: the class overviews
+        """
+
+    @abstractmethod
+    def list_report_versions(self, since: datetime | None = None) -> list[str]:
+        """
+        Retrieves the deployment versions the associated reports originate from, newest first.
+
+        Reports classified before version recording was introduced carry no version and are not represented.
+
+        :param since: if given, only reports created after this instant are considered
+        :return: the distinct versions
         """
 
     @abstractmethod

@@ -15,10 +15,19 @@
 class ApiClient {
     /**
      * @param {number} days the time window in days
+     * @param {?string} version the deployment version to restrict the counts to; null for all versions
      * @returns {Promise<Array>} the class overviews
      */
-    listClasses(days) {
-        return $.getJSON("api/classes", { days: days });
+    listClasses(days, version) {
+        return $.getJSON("api/classes", version ? { days: days, version: version } : { days: days });
+    }
+
+    /**
+     * @param {number} days the time window in days
+     * @returns {Promise<Array<string>>} the deployment versions the window's reports originate from
+     */
+    listVersions(days) {
+        return $.getJSON("api/versions", { days: days });
     }
 
     /**
@@ -421,6 +430,38 @@ class Formats {
     }
 }
 
+/** The selector of the deployment version the class list is restricted to. */
+class VersionFilter {
+    /**
+     * @param {jQuery} $select the selector element
+     * @param {ApiClient} api the client used to load the available versions
+     */
+    constructor($select, api) {
+        this._$select = $select;
+        this._api = api;
+    }
+
+    /** @returns {?string} the selected version, or null if all versions are shown */
+    selected() {
+        return this._$select.val() || null;
+    }
+
+    /**
+     * Loads the versions of the given time window into the selector, retaining the current selection
+     * if the window still contains it.
+     * @param {number} days the time window in days
+     * @returns {Promise<void>} resolved once the selector has been populated
+     */
+    load(days) {
+        const previous = this.selected();
+        return this._api.listVersions(days).then((versions) => {
+            this._$select.empty().append($("<option>").attr("value", "").text("All versions"));
+            versions.forEach((version) => this._$select.append($("<option>").attr("value", version).text(version)));
+            if (previous && versions.includes(previous)) this._$select.val(previous);
+        });
+    }
+}
+
 /** Wires the views together and drives data loading. */
 class App {
     constructor() {
@@ -434,20 +475,35 @@ class App {
             () => this._refreshSelectedClass()
         );
         this._$windowDays = $("#window-days");
+        this._versionFilter = new VersionFilter($("#version-filter"), this._api);
         this._selectedClassId = null;
     }
 
     /** Starts the application. */
     start() {
-        this._$windowDays.on("change", () => this._loadClasses());
-        this._loadClasses();
+        this._$windowDays.on("change", () => this._loadWindow());
+        $("#version-filter").on("change", () => this._loadClasses());
+        this._loadWindow();
     }
 
-    /** Loads and renders the class list for the selected time window. */
+    /** Loads the versions and classes of the selected time window. */
+    _loadWindow() {
+        this._versionFilter.load(this._days()).always(() => this._loadClasses());
+    }
+
+    /** Loads and renders the class list for the selected time window and version. */
     _loadClasses() {
-        this._api.listClasses(Number(this._$windowDays.val()))
-            .then((overviews) => this._listView.render(overviews))
+        this._api.listClasses(this._days(), this._versionFilter.selected())
+            .then((overviews) => {
+                this._listView.render(overviews);
+                if (this._selectedClassId !== null) this._listView.markSelected(this._selectedClassId);
+            })
             .catch(() => this._listView.render([]));
+    }
+
+    /** @returns {number} the selected time window in days */
+    _days() {
+        return Number(this._$windowDays.val());
     }
 
     /**

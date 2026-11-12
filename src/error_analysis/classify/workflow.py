@@ -94,15 +94,22 @@ class ReportClassifier:
         )
 
         # fingerprint and associate each pending report, retrieving report details concurrently
+        # (the details are paired with their summary, which carries the deployment version)
         classes_created = 0
         start = time.monotonic()
         with ThreadPoolExecutor(max_workers=self._fetch_concurrency, thread_name_prefix="report-fetch") as executor:
-            for index, report in enumerate(executor.map(self._provider.get_report, (s.id for s in to_classify)), start=1):
+            reports = executor.map(self._provider.get_report, (s.id for s in to_classify))
+            for index, (summary, report) in enumerate(zip(to_classify, reports, strict=True), start=1):
                 fingerprint = self._algorithm.fingerprint(report)
                 resolution = self._repository.get_or_create_class(fingerprint, exemplar_hint=report.hint)
                 if resolution.created:
                     classes_created += 1
-                self._repository.associate(report.id, resolution.equivalence_class.id, report_created_at=report.created_at)
+                self._repository.associate(
+                    report.id,
+                    resolution.equivalence_class.id,
+                    report_created_at=report.created_at,
+                    report_version=summary.version,
+                )
                 self._log_progress(index, len(to_classify), start)
 
         return ClassificationResult(

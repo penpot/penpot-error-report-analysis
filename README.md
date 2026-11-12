@@ -70,8 +70,8 @@ Subsequent `bootstrap_analysis` calls then only classify reports that arrived si
     pixi run error-analysis-web [--host 127.0.0.1] [--port 5100]
 
 serves the dashboard at http://127.0.0.1:5100. The dashboard lists the equivalence classes of a
-selectable time window and provides per-class fingerprint signatures, analysis insights, and member
-report inspection.
+selectable time window, optionally restricted to a single deployment version, and provides per-class
+fingerprint signatures, analysis insights, and member report inspection.
 
 ## Development
 
