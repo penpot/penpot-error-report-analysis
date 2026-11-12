@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import datetime
 from uuid import UUID
 
@@ -111,6 +111,16 @@ class AnalysisRepository(ABC):
         :param version: if given, only reports originating from this deployment version contribute to the
             report counts, and classes without any such report are omitted
         :return: the class overviews
+        """
+
+    @abstractmethod
+    def record_report_versions(self, versions: Mapping[UUID, str]) -> int:
+        """
+        Records the deployment version of reports that were associated before their version was
+        recorded, leaving associations that already carry a version untouched.
+
+        :param versions: the version of each report, keyed by report identifier
+        :return: the number of associations that were updated
         """
 
     @abstractmethod

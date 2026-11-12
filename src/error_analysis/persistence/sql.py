@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Collection
+from collections import defaultdict
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, event, func, inspect, select, text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, event, func, inspect, select, text, update
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.types import TypeDecorator
@@ -345,6 +346,26 @@ class SqlAnalysisRepository(AnalysisRepository):
                 if not restricted or report_counts.get(entity.id, 0) > 0
             ]
             return sorted(overviews, key=lambda o: o.report_count, reverse=True)
+
+    def record_report_versions(self, versions: Mapping[UUID, str]) -> int:
+        with self._session_factory.begin() as session:
+            # group the reports by version, so that one statement covers all reports of a version
+            reports_by_version: dict[str, list[str]] = defaultdict(list)
+            for report_id, version in versions.items():
+                reports_by_version[version].append(str(report_id))
+
+            # update the associations that do not carry a version yet, querying ids in chunks
+            updated = 0
+            for version, report_ids in reports_by_version.items():
+                for start in range(0, len(report_ids), self._ID_QUERY_CHUNK_SIZE):
+                    chunk = report_ids[start : start + self._ID_QUERY_CHUNK_SIZE]
+                    result: Any = session.execute(
+                        update(_ReportAssociationEntity)
+                        .where(_ReportAssociationEntity.report_id.in_(chunk), _ReportAssociationEntity.report_version.is_(None))
+                        .values(report_version=version)
+                    )
+                    updated += result.rowcount
+            return updated
 
     def list_report_versions(self, since: datetime | None = None) -> list[str]:
         with self._session_factory() as session:

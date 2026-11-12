@@ -90,6 +90,21 @@ Insights can also be written by hand ("Write insight" in a class's insights sect
 to record a reproduction or a decision that subsequent analysis sessions are to build upon; they are
 stored alongside the LLM-generated ones and are offered to the LLM in the same way.
 
+### Backfills
+
+Data recorded before the respective field existed is enriched by
+
+    pixi run error-analysis-backfill [--scope all|versions|severities] [--days 30] [--reassess]
+
+*Versions* are retrieved from the report listing, which states the deployment version of each
+report; the run pages summaries only (no report details) and covers the reports of the given window
+that the source still retains. *Severities* are derived from the `Severity` section of each analyzed
+class's newest insight: the section's opening verdict is assigned, unless its immediate justification
+names a differing severity ("medium for user impact, high for signal quality") — such classes are
+reported as undecided and left for a human to assess in the dashboard rather than given a severity
+the analysis does not state. Both backfills are idempotent and leave recorded data untouched
+(`--reassess` deriving severities anew for classes that already carry one).
+
 ## Development
 
     pixi run check   # format, lint, typecheck
