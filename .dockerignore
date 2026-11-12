@@ -1,0 +1,10 @@
+.git/
+.pixi/
+.playwright-mcp/
+data*/
+.env
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+.mypy_cache/
+.ruff_cache/

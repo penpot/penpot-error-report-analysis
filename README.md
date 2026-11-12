@@ -105,6 +105,35 @@ reported as undecided and left for a human to assess in the dashboard rather tha
 the analysis does not state. Both backfills are idempotent and leave recorded data untouched
 (`--reassess` deriving severities anew for classes that already carry one).
 
+## Docker
+
+The `docker` directory builds a single image that runs both servers behind an nginx reverse proxy,
+which exposes them under one port (8080): the dashboard at `/` and the MCP endpoint at `/mcp`.
+
+    docker build -t penpot-error-analysis -f docker/Dockerfile .
+    docker run -d --name penpot-error-analysis --restart unless-stopped \
+        --env-file .env -p 8080:8080 \
+        -v error-analysis-data:/opt/data \
+        penpot-error-analysis
+
+The credentials are read from the repository's `.env` file; they can equally be passed
+individually (`-e PENPOT_API_URI=... -e PENPOT_ACCESS_TOKEN=...`).
+
+The environment is installed from `pixi.lock`, so the image runs the dependency versions the
+platform is developed against. The database is written to `/opt/data/analysis.sqlite` (overridable
+via `ERROR_ANALYSIS_DB`); mount `/opt/data` to persist it. Both servers bind to the container's
+loopback interface and are thus reachable through the proxy only.
+
+> [!IMPORTANT]
+> The container runs as uid 1001, for which a named volume is set up automatically. A bind-mounted
+> host directory, in contrast, keeps its own ownership, so the container must be run as the user
+> owning it (`--user "$(id -u):$(id -g)"`) — otherwise the database is read-only, which fails the
+> schema upgrade performed at startup.
+
+> [!NOTE]
+> The dashboard is served by Flask's development server, as it is in local usage. The image is
+> intended for internal deployments, not for public exposure.
+
 ## Development
 
     pixi run check   # format, lint, typecheck
