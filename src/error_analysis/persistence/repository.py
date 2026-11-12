@@ -14,6 +14,7 @@ from error_analysis.persistence.records import (
     ClassTriage,
     EquivalenceClassRecord,
     InsightRecord,
+    ReportMove,
 )
 
 
@@ -33,6 +34,32 @@ class AnalysisRepository(ABC):
         :param fingerprint: the fingerprint identifying the class
         :param exemplar_hint: the raw hint of a member report, cached at class creation for display purposes
         :return: the resolution, carrying the class and whether it was newly created
+        """
+
+    @abstractmethod
+    def create_manual_class(self, hint: str, signature: str) -> EquivalenceClassRecord:
+        """
+        Creates an equivalence class that is not derived from a fingerprint and is therefore populated
+        by moving reports into it.
+
+        :param hint: the hint characterizing the class, taking the place of a member report's cached hint
+        :param signature: the description of what unites the class, taking the place of a fingerprint signature
+        :return: the created class
+        """
+
+    @abstractmethod
+    def move_reports(self, report_ids: Collection[UUID], target_class_id: int) -> ReportMove:
+        """
+        Moves the given reports to the given equivalence class, adjusting the first/last-seen instants
+        of the target class and of the classes the reports are taken from. Reports that already belong
+        to the target class are left alone. The move is atomic: either all given reports are moved or
+        none is.
+
+        :param report_ids: the identifiers of the reports to move
+        :param target_class_id: the identifier of the equivalence class the reports are to belong to
+        :return: the outcome of the move
+        :raises KeyError: if no class with the given identifier exists, or if any of the given reports
+            is not associated with a class
         """
 
     @abstractmethod

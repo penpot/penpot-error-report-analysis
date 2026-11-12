@@ -22,6 +22,7 @@ from error_analysis.persistence.records import (
     ClassTriage,
     EquivalenceClassRecord,
     InsightRecord,
+    ReportMove,
     Severity,
 )
 from error_analysis.persistence.repository import AnalysisRepository
@@ -228,6 +229,60 @@ class SqlAnalysisRepository(AnalysisRepository):
             session.flush()
             return ClassResolution(equivalence_class=entity.to_record(), created=True)
 
+    def create_manual_class(self, hint: str, signature: str) -> EquivalenceClassRecord:
+        with self._session_factory.begin() as session:
+            # create the class with a synthetic digest, which no fingerprint can match, and with the
+            # seen-instant cache initialized to the current time (the instants follow the members moved in)
+            now = datetime.now(UTC)
+            entity = _EquivalenceClassEntity(
+                digest=EquivalenceClassRecord.new_manual_digest(),
+                signature=signature,
+                algorithm_version=EquivalenceClassRecord.MANUAL_ALGORITHM_VERSION,
+                exemplar_hint=hint,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            session.add(entity)
+            session.flush()
+            return entity.to_record()
+
+    def move_reports(self, report_ids: Collection[UUID], target_class_id: int) -> ReportMove:
+        with self._session_factory.begin() as session:
+            # resolve the target class and the associations of the given reports, rejecting unknown identifiers
+            target = session.get(_EquivalenceClassEntity, target_class_id)
+            if target is None:
+                raise KeyError(f"No equivalence class with id {target_class_id}")
+            associations = self._associations(session, report_ids)
+            if unknown := sorted(str(report_id) for report_id in report_ids if report_id not in associations):
+                raise KeyError(f"No equivalence class association exists for the reports {unknown}")
+
+            # reassign the associations that do not point to the target class yet
+            moved: list[UUID] = []
+            retained: list[UUID] = []
+            source_class_ids: set[int] = set()
+            for report_id in dict.fromkeys(report_ids):
+                association = associations[report_id]
+                if association.class_id == target_class_id:
+                    retained.append(report_id)
+                    continue
+                source_class_ids.add(association.class_id)
+                association.class_id = target_class_id
+                moved.append(report_id)
+            session.flush()
+
+            # recompute the seen-instant caches, which the reassignment widens for the target class
+            # and may narrow for the source classes
+            self._refresh_seen_instants(session, target_class_id)
+            emptied = [class_id for class_id in sorted(source_class_ids) if not self._refresh_seen_instants(session, class_id)]
+
+            return ReportMove(
+                target_class=target.to_record(),
+                moved_report_ids=tuple(moved),
+                retained_report_ids=tuple(retained),
+                source_class_ids=tuple(sorted(source_class_ids)),
+                emptied_class_ids=tuple(emptied),
+            )
+
     def associate(self, report_id: UUID, class_id: int, report_created_at: datetime, report_version: str | None = None) -> None:
         with self._session_factory.begin() as session:
             # insert the association unless it already exists
@@ -327,6 +382,47 @@ class SqlAnalysisRepository(AnalysisRepository):
         with self._session_factory() as session:
             statement = select(_InsightEntity).where(_InsightEntity.class_id == class_id).order_by(_InsightEntity.created_at.asc())
             return [entity.to_record() for entity in session.scalars(statement).all()]
+
+    @classmethod
+    def _associations(cls, session: Session, report_ids: Collection[UUID]) -> dict[UUID, _ReportAssociationEntity]:
+        """
+        :param session: the session to query in
+        :param report_ids: the identifiers of the reports whose associations are sought
+        :return: the existing associations, keyed by report identifier
+        """
+        id_strings = [str(report_id) for report_id in report_ids]
+        associations: dict[UUID, _ReportAssociationEntity] = {}
+        for start in range(0, len(id_strings), cls._ID_QUERY_CHUNK_SIZE):
+            chunk = id_strings[start : start + cls._ID_QUERY_CHUNK_SIZE]
+            statement = select(_ReportAssociationEntity).where(_ReportAssociationEntity.report_id.in_(chunk))
+            associations.update({UUID(entity.report_id): entity for entity in session.scalars(statement).all()})
+        return associations
+
+    @classmethod
+    def _refresh_seen_instants(cls, session: Session, class_id: int) -> bool:
+        """
+        Recomputes the given class's cached first/last-seen instants from its member reports, retaining
+        the cached instants if the class has no members.
+
+        :param session: the session to work in
+        :param class_id: the identifier of the equivalence class
+        :return: whether the class has any member report
+        """
+        # determine the extent of the class's member reports
+        first_seen, last_seen = session.execute(
+            select(func.min(_ReportAssociationEntity.report_created_at), func.max(_ReportAssociationEntity.report_created_at)).where(
+                _ReportAssociationEntity.class_id == class_id
+            )
+        ).one()
+        if first_seen is None or last_seen is None:
+            return False
+
+        # write the extent to the class's cache
+        entity = session.get(_EquivalenceClassEntity, class_id)
+        if entity is not None:
+            entity.first_seen_at = cls._as_utc(first_seen)
+            entity.last_seen_at = cls._as_utc(last_seen)
+        return True
 
     @staticmethod
     def _report_counts(session: Session, count_since: datetime | None, version: str | None = None) -> dict[int, int]:
