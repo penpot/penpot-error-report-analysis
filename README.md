@@ -82,6 +82,10 @@ a column of the class list), the numbers of the GitHub issue and the pull reques
 a *fixed* marker for defects that are resolved but keep appearing in reports of older windows. The
 severity is equally assigned by the analyzing LLM via the `store_insight` and `set_class_triage` tools.
 
+Insights can also be written by hand ("Write insight" in a class's insights section), for instance
+to record a reproduction or a decision that subsequent analysis sessions are to build upon; they are
+stored alongside the LLM-generated ones and are offered to the LLM in the same way.
+
 ## Development
 
     pixi run check   # format, lint, typecheck

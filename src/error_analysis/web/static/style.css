@@ -227,6 +227,49 @@ pre.code-block {
 .triage-control .link-button { border: none; padding: 0 0.3rem; color: var(--muted); line-height: 1; }
 .fixed-control { display: flex; align-items: center; gap: 0.3rem; cursor: pointer; }
 
+/* insight composer */
+
+.insight-composer { margin-top: 0.4rem; }
+
+.compose-form {
+  margin-top: 0.6rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.compose-form textarea {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  resize: vertical;
+}
+
+.compose-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  margin-top: 0.6rem;
+}
+
+.compose-fields label { display: flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.78rem; }
+
+.compose-fields input, .compose-fields select {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.compose-fields select { max-width: 22rem; }
+.compose-status { font-size: 0.78rem; flex: 1 1 100%; }
+
 .insight-content h1, .insight-content h2, .insight-content h3 { font-size: 0.95rem; margin: 0.8rem 0 0.3rem; }
 .insight-content p, .insight-content ul { margin: 0.4rem 0; }
 .insight-content code { font-family: var(--mono); font-size: 0.82rem; background: var(--bg); padding: 0 0.2rem; }
