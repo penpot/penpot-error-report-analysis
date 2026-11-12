@@ -2,7 +2,8 @@
  * Penpot error report analysis dashboard.
  *
  * Object-oriented structure: ApiClient (server communication), ClassListView (left pane),
- * ClassDetailView (right pane) with TriagePanel, ReportOverlay (member report inspection), App (wiring).
+ * ClassDetailView (right pane) with TriagePanel and InsightComposer, ReportOverlay (member report
+ * inspection), App (wiring).
  */
 "use strict";
 
@@ -62,6 +63,15 @@ class ApiClient {
      */
     setTriage(classId, triage) {
         return this._send(`api/classes/${classId}/triage`, "PUT", triage);
+    }
+
+    /**
+     * @param {number} classId the id of the equivalence class
+     * @param {Object} insight the insight to store (markdown, author, analyzed_report_id)
+     * @returns {Promise<Object>} the stored insight
+     */
+    addInsight(classId, insight) {
+        return this._send(`api/classes/${classId}/insights`, "POST", insight);
     }
 
     /**
@@ -288,6 +298,108 @@ class TriagePanel {
     }
 }
 
+/** Captures an insight written by hand and stores it for an equivalence class. */
+class InsightComposer {
+    /** the storage key under which the author is remembered across sessions */
+    static AUTHOR_KEY = "error-analysis.insight-author";
+
+    /**
+     * @param {ApiClient} api the client used to store the insight
+     * @param {function(): void} onStored invoked once an insight has been stored
+     */
+    constructor(api, onStored) {
+        this._api = api;
+        this._onStored = onStored;
+    }
+
+    /**
+     * @param {Object} detail the class details the insight is written for
+     * @returns {jQuery} the composer: a button revealing the entry form
+     */
+    render(detail) {
+        const $form = this._buildForm(detail).addClass("hidden");
+        const $toggle = $("<button>").attr("type", "button").addClass("compose-toggle").text("Write insight")
+            .on("click", () => {
+                $form.toggleClass("hidden");
+                if (!$form.hasClass("hidden")) $form.find("textarea").trigger("focus");
+            });
+        return $("<div>").addClass("insight-composer").append($toggle).append($form);
+    }
+
+    /**
+     * @param {Object} detail the class details the insight is written for
+     * @returns {jQuery} the entry form
+     */
+    _buildForm(detail) {
+        const $markdown = $("<textarea>").attr({ rows: 12, placeholder: "Insight in markdown — what is known about this error class?" });
+        const $author = $("<input>").attr({ type: "text", placeholder: "author" }).val(this._rememberedAuthor());
+        const $report = this._buildReportSelect(detail.members);
+        const $status = $("<span>").addClass("muted compose-status");
+        const $save = $("<button>").attr("type", "button").text("Save insight")
+            .on("click", () => this._store(detail.id, $markdown, $author, $report, $status));
+        const $fields = $("<div>").addClass("compose-fields")
+            .append($("<label>").text("Author").append($author))
+            .append($("<label>").text("Analyzed report").append($report))
+            .append($save)
+            .append($status);
+        return $("<div>").addClass("compose-form").append($markdown).append($fields);
+    }
+
+    /**
+     * @param {Array} members the member reports of the class
+     * @returns {jQuery} the selector of the report the insight refers to
+     */
+    _buildReportSelect(members) {
+        const $select = $("<select>");
+        members.forEach((member) => {
+            $select.append($("<option>").attr("value", member.report_id).text(`${Formats.dateTime(member.created_at)} · ${member.report_id}`));
+        });
+        return $select;
+    }
+
+    /**
+     * Stores the composed insight.
+     * @param {number} classId the id of the equivalence class
+     * @param {jQuery} $markdown the markdown input
+     * @param {jQuery} $author the author input
+     * @param {jQuery} $report the analyzed report selector
+     * @param {jQuery} $status the element conveying the outcome
+     */
+    _store(classId, $markdown, $author, $report, $status) {
+        const markdown = $markdown.val().trim();
+        if (!markdown) {
+            $status.text("The insight must not be empty.");
+            return;
+        }
+        const author = $author.val().trim();
+        this._rememberAuthor(author);
+        this._api.addInsight(classId, { markdown: markdown, author: author, analyzed_report_id: $report.val() })
+            .then(() => this._onStored())
+            .catch(() => $status.text("Storing the insight failed."));
+    }
+
+    /** @returns {string} the author remembered from the previous entry, if any */
+    _rememberedAuthor() {
+        try {
+            return window.localStorage.getItem(InsightComposer.AUTHOR_KEY) || "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    /**
+     * Remembers the author for subsequent entries.
+     * @param {string} author the author to remember
+     */
+    _rememberAuthor(author) {
+        try {
+            window.localStorage.setItem(InsightComposer.AUTHOR_KEY, author);
+        } catch (e) {
+            // storage being unavailable merely costs the convenience of a prefilled author
+        }
+    }
+}
+
 /** Renders the details of a selected equivalence class. */
 class ClassDetailView {
     /**
@@ -301,6 +413,7 @@ class ClassDetailView {
         this._api = api;
         this._onReportOpen = onReportOpen;
         this._triagePanel = new TriagePanel(api, onClassChanged);
+        this._composer = new InsightComposer(api, onClassChanged);
     }
 
     /**
@@ -311,7 +424,7 @@ class ClassDetailView {
         this._$pane.empty();
         this._$pane
             .append(this._buildHeader(detail))
-            .append(this._buildInsightsSection(detail.insights))
+            .append(this._buildInsightsSection(detail))
             .append(this._buildSection("Fingerprint signature", $("<pre>").addClass("code-block").text(detail.signature)))
             .append(this._buildMembersSection(detail.members));
     }
@@ -334,17 +447,19 @@ class ClassDetailView {
     }
 
     /**
-     * @param {Array} insights the insights of the class
-     * @returns {jQuery} the insights section
+     * @param {Object} detail the class details
+     * @returns {jQuery} the insights section, including the composer for manually written insights
      */
-    _buildInsightsSection(insights) {
-        if (insights.length === 0) {
-            const $note = $("<p>").addClass("no-insights")
-                .text("Not yet analyzed. Run an analysis session via the MCP server to gather insights.");
-            return this._buildSection("Insights", $note);
+    _buildInsightsSection(detail) {
+        const $content = [];
+        if (detail.insights.length === 0) {
+            $content.push($("<p>").addClass("no-insights")
+                .text("Not yet analyzed. Run an analysis session via the MCP server, or write an insight yourself."));
+        } else {
+            detail.insights.forEach((insight) => $content.push(this._buildInsight(insight)));
         }
-        const $insights = insights.map((insight) => this._buildInsight(insight));
-        return this._buildSection("Insights", $insights);
+        $content.push(this._composer.render(detail));
+        return this._buildSection("Insights", $content);
     }
 
     /**

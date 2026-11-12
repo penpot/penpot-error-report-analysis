@@ -79,7 +79,7 @@ class WebBackend:
 
     Serves the static dashboard at the root path and provides the JSON endpoints the dashboard
     consumes: class overviews, class details (with insights and members), report details, as well as
-    the recording of triage state.
+    the recording of triage state and manually written insights.
     """
 
     _DEFAULT_WINDOW_DAYS = 30
@@ -113,6 +113,7 @@ class WebBackend:
         self._app.add_url_rule("/api/versions", view_func=self._list_versions)
         self._app.add_url_rule("/api/classes/<int:class_id>", view_func=self._get_class)
         self._app.add_url_rule("/api/classes/<int:class_id>/triage", view_func=self._set_triage, methods=["PUT"])
+        self._app.add_url_rule("/api/classes/<int:class_id>/insights", view_func=self._add_insight, methods=["POST"])
         self._app.add_url_rule("/api/classes/<int:class_id>/insights/<int:insight_id>/issue-draft", view_func=self._get_issue_draft)
         self._app.add_url_rule("/api/reports/<report_id>", view_func=self._get_report)
 
@@ -184,6 +185,35 @@ class WebBackend:
             return jsonify({"error": f"no equivalence class with id {class_id}"}), 404
         return jsonify(JsonSerializer.equivalence_class(record))
 
+    def _add_insight(self, class_id: int) -> Any:
+        """
+        Stores a manually written insight for an equivalence class, as given by the request body's
+        ``markdown`` and optional ``author`` entries. The analyzed report is the one given by
+        ``analyzed_report_id``, defaulting to the class's most recent member.
+        """
+        # validate the referenced class and the submitted content
+        if self._context.repository.get_class(class_id) is None:
+            return jsonify({"error": f"no equivalence class with id {class_id}"}), 404
+        payload = request.get_json(silent=True) or {}
+        markdown = str(payload.get("markdown") or "").strip()
+        if not markdown:
+            return jsonify({"error": "'markdown' must not be empty"}), 400
+
+        # resolve the analyzed report
+        try:
+            analyzed_report_id = self._resolve_analyzed_report(class_id, payload.get("analyzed_report_id"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        # store the insight
+        insight = self._context.repository.add_insight(
+            class_id=class_id,
+            analyzed_report_id=analyzed_report_id,
+            markdown=markdown,
+            author=str(payload.get("author") or "").strip() or None,
+        )
+        return jsonify(JsonSerializer.insight(insight)), 201
+
     def _get_issue_draft(self, class_id: int, insight_id: int) -> Any:
         """
         Delivers the GitHub issue draft for an insight: title, body, and the URL of GitHub's issue
@@ -228,6 +258,25 @@ class WebBackend:
         except ValueError as e:
             raise ValueError("query parameter 'days' must be an integer") from e
         return datetime.now(UTC) - timedelta(days=days)
+
+    def _resolve_analyzed_report(self, class_id: int, raw_report_id: Any) -> UUID:
+        """
+        :param class_id: the identifier of the equivalence class the insight pertains to
+        :param raw_report_id: the report identifier given in the request, if any
+        :return: the given report identifier, or that of the class's most recent member if none was given
+        :raises ValueError: if the given identifier is malformed, or if no identifier was given and the
+            class has no members
+        """
+        if raw_report_id:
+            try:
+                return UUID(str(raw_report_id))
+            except ValueError as e:
+                raise ValueError(f"invalid report id '{raw_report_id}'") from e
+
+        members = self._context.repository.member_report_ids(class_id, limit=1)
+        if not members:
+            raise ValueError("'analyzed_report_id' is required, as the class has no member reports")
+        return members[0][0]
 
 
 def main() -> None:
