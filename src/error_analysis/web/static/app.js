@@ -425,7 +425,9 @@ class ClassDetailView {
         this._$pane
             .append(this._buildHeader(detail))
             .append(this._buildInsightsSection(detail))
-            .append(this._buildSection("Fingerprint signature", $("<pre>").addClass("code-block").text(detail.signature)))
+            .append(this._buildSection(
+                detail.manually_created ? "Class description" : "Fingerprint signature",
+                $("<pre>").addClass("code-block").text(detail.signature)))
             .append(this._buildMembersSection(detail.members));
     }
 
@@ -437,9 +439,14 @@ class ClassDetailView {
         const $meta = $("<div>").addClass("detail-meta")
             .append($("<span>").text(`class #${detail.id}`))
             .append($("<span>").text(`first seen ${Formats.date(detail.first_seen_at)}`))
-            .append($("<span>").text(`last seen ${Formats.date(detail.last_seen_at)}`))
-            .append($("<span>").text(`fingerprint v${detail.algorithm_version}`))
-            .append($("<span>").attr("title", detail.digest).text(`digest ${detail.digest.substring(0, 12)}…`));
+            .append($("<span>").text(`last seen ${Formats.date(detail.last_seen_at)}`));
+        if (detail.manually_created) {
+            $meta.append($("<span>").text("manually created"));
+        } else {
+            $meta
+                .append($("<span>").text(`fingerprint v${detail.algorithm_version}`))
+                .append($("<span>").attr("title", detail.digest).text(`digest ${detail.digest.substring(0, 12)}…`));
+        }
         return $("<div>").addClass("detail-header")
             .append($("<h2>").text(detail.exemplar_hint || "(no hint)"))
             .append($meta)

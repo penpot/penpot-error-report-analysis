@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from uuid import UUID
+from typing import ClassVar
+from uuid import UUID, uuid4
 
 
 class Severity(Enum):
@@ -55,6 +56,12 @@ class EquivalenceClassRecord:
     :ivar triage: the curated triage state of the class
     """
 
+    MANUAL_ALGORITHM_VERSION: ClassVar[int] = 0
+    """the algorithm version recorded for classes that were created manually rather than by fingerprinting"""
+
+    _MANUAL_DIGEST_PREFIX: ClassVar[str] = "manual-"
+    """the digest prefix designating a manually created class; a fingerprint digest, being a hex digest, never carries it"""
+
     id: int
     digest: str
     signature: str
@@ -63,6 +70,22 @@ class EquivalenceClassRecord:
     first_seen_at: datetime
     last_seen_at: datetime
     triage: ClassTriage = ClassTriage()
+
+    @classmethod
+    def new_manual_digest(cls) -> str:
+        """
+        :return: a freshly generated digest identifying a manually created class
+        """
+        return f"{cls._MANUAL_DIGEST_PREFIX}{uuid4().hex}"
+
+    @property
+    def manually_created(self) -> bool:
+        """
+        Whether the class was created manually rather than derived from a report fingerprint.
+        Manually created classes are populated by moving reports into them; no fingerprint
+        identifies them, so classification never assigns reports to them.
+        """
+        return self.digest.startswith(self._MANUAL_DIGEST_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -91,6 +114,25 @@ class ClassOverview:
     equivalence_class: EquivalenceClassRecord
     report_count: int
     insight_count: int
+
+
+@dataclass(frozen=True)
+class ReportMove:
+    """
+    The outcome of moving error reports to an equivalence class.
+
+    :ivar target_class: the class the reports now belong to
+    :ivar moved_report_ids: the reports that changed their class
+    :ivar retained_report_ids: the reports that already belonged to the target class
+    :ivar source_class_ids: the classes the moved reports were taken from
+    :ivar emptied_class_ids: the source classes that are left without any member report
+    """
+
+    target_class: EquivalenceClassRecord
+    moved_report_ids: tuple[UUID, ...]
+    retained_report_ids: tuple[UUID, ...]
+    source_class_ids: tuple[int, ...]
+    emptied_class_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)

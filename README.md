@@ -51,7 +51,11 @@ which also delivers the analysis workflow instructions.
 
 Beyond analysis, the classes themselves can be curated through the MCP server: `set_class_triage`
 records a class's severity, the numbers of the GitHub issue and the pull request addressing it, and
-the *fixed* marker (only the given properties change).
+the *fixed* marker (only the given properties change). `create_equivalence_class` and `move_reports`
+correct the grouping: reports that the fingerprint lumped together although they pertain to different
+defects are moved into a new, manually created class, and classes pertaining to the same defect are
+merged by moving one's reports into the other. Note that classification keeps following the
+fingerprints, so later reports of a moved kind again arrive in the class they were moved out of.
 
 > [!IMPORTANT]
 > The analyzing LLM should additionally have access to the 

@@ -19,10 +19,12 @@ from error_analysis.context import AnalysisContext
 from error_analysis.logging_config import configure_logging
 from error_analysis.mcp.tools import (
     BootstrapAnalysisTool,
+    CreateEquivalenceClassTool,
     GetAnalysisCandidatesTool,
     GetEquivalenceClassTool,
     GetReportDetailsTool,
     ListClassOverviewsTool,
+    MoveReportsTool,
     SetClassTriageTool,
     StoreInsightTool,
 )
@@ -36,8 +38,9 @@ into equivalence classes (one class per underlying issue); the platform stores c
 analysis insights. To perform an analysis session, call bootstrap_analysis once and follow the
 instructions it returns: it provides an overview of the unanalyzed classes, upon which the user decides
 what shall be analyzed; the chosen classes are then retrieved via get_analysis_candidates.
-Beyond analysis, the triage state of the classes (severity, GitHub issue and pull request numbers,
-fixed marker) is recorded via set_class_triage."""
+Beyond analysis, the classes themselves can be curated: their triage state (severity, GitHub issue and
+pull request numbers, fixed marker) is recorded via set_class_triage, and misgrouped reports are
+rearranged via create_equivalence_class and move_reports."""
 
 _TOOL_CLASSES: list[type[Tool]] = [
     BootstrapAnalysisTool,
@@ -47,6 +50,8 @@ _TOOL_CLASSES: list[type[Tool]] = [
     GetReportDetailsTool,
     StoreInsightTool,
     SetClassTriageTool,
+    CreateEquivalenceClassTool,
+    MoveReportsTool,
 ]
 
 

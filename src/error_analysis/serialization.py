@@ -40,6 +40,7 @@ class JsonSerializer:
             "digest": record.digest,
             "signature": record.signature,
             "algorithm_version": record.algorithm_version,
+            "manually_created": record.manually_created,
             "exemplar_hint": record.exemplar_hint,
             "first_seen_at": record.first_seen_at.isoformat(),
             "last_seen_at": record.last_seen_at.isoformat(),

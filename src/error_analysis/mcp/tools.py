@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from error_analysis.mcp.tools_base import Tool, ToolCallError
-from error_analysis.persistence.records import ClassOverview, Severity
+from error_analysis.persistence.records import ClassOverview, EquivalenceClassRecord, Severity
 from error_analysis.persistence.repository import AnalysisRepository
 from error_analysis.serialization import JsonSerializer
 
@@ -313,6 +313,100 @@ class StoreInsightTool(Tool):
             author=author or None,
         )
         return self._to_json(JsonSerializer.insight(insight))
+
+
+class _ClassCurationTool(Tool):
+    """
+    The base of the tools curating the composition of equivalence classes.
+    """
+
+    def _move_reports(self, report_ids: list[str], target_class_id: int) -> dict[str, object]:
+        """
+        Moves the given reports to the given equivalence class.
+
+        :param report_ids: the ids (UUIDs) of the reports to move
+        :param target_class_id: the id of the equivalence class the reports are to belong to
+        :return: the JSON-compatible summary of the move
+        :raises ToolCallError: if an id is malformed, the class does not exist, or a report is not
+            associated with any class; in these cases, no report is moved
+        """
+        try:
+            move = self._context.repository.move_reports([self._parse_uuid(report_id) for report_id in report_ids], target_class_id)
+        except KeyError as e:
+            raise ToolCallError(str(e.args[0])) from e
+        return {
+            "target_class_id": move.target_class.id,
+            "moved_report_ids": [str(report_id) for report_id in move.moved_report_ids],
+            "already_in_target_class": [str(report_id) for report_id in move.retained_report_ids],
+            "source_class_ids": list(move.source_class_ids),
+            "emptied_class_ids": list(move.emptied_class_ids),
+        }
+
+
+class CreateEquivalenceClassTool(_ClassCurationTool):
+    """
+    Creates a manually curated equivalence class.
+    """
+
+    def apply(self, hint: str, description: str = "", report_ids: list[str] | None = None) -> str:
+        """
+        Creates a new equivalence class that is not derived from a fingerprint and moves the given reports
+        into it. Use this to split reports that the fingerprint algorithm grouped together although they
+        pertain to different defects; to merge classes, move the reports of one class into another via
+        move_reports instead.
+        Note that classification keeps following the fingerprints: it never assigns reports to a manually
+        created class, so later reports of the same kind arrive in the class the given reports were taken
+        from, and moving them here is to be repeated.
+
+        :param hint: the hint characterizing the class, displayed wherever classes are listed
+        :param description: the description of what unites the class, taking the place of the fingerprint
+            signature that an automatically created class carries
+        :param report_ids: the ids (UUIDs) of the reports to move into the new class
+        :return: a JSON object describing the created class and the reports moved into it
+        """
+        # create the class, which is empty at first
+        record = self._context.repository.create_manual_class(hint=hint, signature=description)
+
+        # populate it with the given reports
+        result: dict[str, object] = {"equivalence_class": JsonSerializer.equivalence_class(record)}
+        if report_ids:
+            result["move"] = self._move_reports(report_ids, record.id)
+            result["equivalence_class"] = JsonSerializer.equivalence_class(self._reloaded(record.id))
+        return self._to_json(result)
+
+    def _reloaded(self, class_id: int) -> EquivalenceClassRecord:
+        """
+        :param class_id: the id of the equivalence class
+        :return: the class as recorded after the move, whose seen instants cover the moved reports
+        :raises ToolCallError: if the class no longer exists
+        """
+        record = self._context.repository.get_class(class_id)
+        if record is None:
+            raise ToolCallError(f"No equivalence class with id {class_id} exists")
+        return record
+
+
+class MoveReportsTool(_ClassCurationTool):
+    """
+    Moves error reports between equivalence classes.
+    """
+
+    def apply(self, report_ids: list[str], target_class_id: int) -> str:
+        """
+        Moves the given error reports to the given equivalence class, taking them out of the classes they
+        belong to so far. Use this to correct the classification: to merge two classes that pertain to the
+        same defect (moving all member reports of one class into the other, which leaves the source class
+        empty), or to move individual reports that were grouped with an unrelated defect. Reports already
+        belonging to the target class are left alone; if any of the given reports is not classified at all,
+        no report is moved.
+        Note that classification keeps following the fingerprints: later reports of the moved kind arrive
+        in the class they were taken from, so the move is to be repeated for them.
+
+        :param report_ids: the ids (UUIDs) of the reports to move
+        :param target_class_id: the id of the equivalence class the reports are to belong to
+        :return: a JSON object describing the move, including the source classes left without members
+        """
+        return self._to_json(self._move_reports(report_ids, target_class_id))
 
 
 class SetClassTriageTool(Tool):
