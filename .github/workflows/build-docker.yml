@@ -50,7 +50,7 @@ permissions:
 
 jobs:
   # ── 1. Decide whether there is anything to build (set-level) ───────────
-  prepare: yms
+  prepare:
     name: Prepare
     runs-on: penpot-standar-runner
     timeout-minutes: 10
