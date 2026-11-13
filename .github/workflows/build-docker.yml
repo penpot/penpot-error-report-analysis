@@ -1,0 +1,362 @@
+name: Docker Image Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      gh_ref:
+        description: 'Name of the branch or ref'
+        type: string
+        required: true
+        default: 'main'
+      force:
+        description: 'Rebuild and overwrite even if already built'
+        type: boolean
+        required: false
+        default: false
+  workflow_call:
+    inputs:
+      gh_ref:
+        description: 'Name of the branch or ref'
+        type: string
+        required: true
+      force:
+        description: 'Rebuild and overwrite even if already built'
+        type: boolean
+        required: false
+        default: false
+    secrets:
+      DOCKER_PASSWORD:
+        required: false
+      DOCKER_REGISTRY:
+        required: false
+      DOCKER_USERNAME:
+        required: false
+      MATTERMOST_WEBHOOK:
+        required: false
+      PUB_DOCKER_PASSWORD:
+        required: false
+      PUB_DOCKER_USERNAME:
+        required: false
+
+# Literal group name: under `workflow_call`, `github.workflow` resolves to the
+# caller's workflow, which left a manual dispatch of the same ref in a group of
+# its own, free to race on the same branch tag.
+concurrency:
+  group: dbg-image-${{ inputs.gh_ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Decide whether there is anything to build (set-level) ───────────
+  prepare: yms
+    name: Prepare
+    runs-on: penpot-standar-runner
+    timeout-minutes: 10
+    outputs:
+      gh_ref: ${{ steps.vars.outputs.gh_ref }}
+      ref_slug: ${{ steps.vars.outputs.ref_slug }}
+      bundle_version: ${{ steps.vars.outputs.bundle_version }}
+      sha: ${{ steps.vars.outputs.sha }}
+      build_key: ${{ steps.vars.outputs.build_key }}
+      commit_title: ${{ steps.vars.outputs.commit_title }}
+      exists: ${{ steps.check.outputs.exists }}
+
+    steps:
+      - name: Set common environment variables
+        run: |
+          # Each job execution will use its own docker configuration.
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker-${{ github.run_id }}-${{ github.job }}" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history is only needed for `git describe --tags`.
+          fetch-depth: 0
+          ref: ${{ inputs.gh_ref }}
+
+      - name: Extract some useful variables
+        id: vars
+        env:
+          GH_REF: ${{ inputs.gh_ref || github.ref_name }}
+        run: |
+          # A git ref accepts characters that a Docker tag does not.
+          REF_SLUG=$(printf '%s' "$GH_REF" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-100)
+          # The version is part of the build key: a new tag on an already
+          # built commit must produce a new image set.
+          BUNDLE_VERSION=$(git describe --tags --always)
+          SHA=$(git rev-parse --short=12 HEAD)
+          # Only the closest tag goes into the key: the sha already pins the
+          # commit, and the -g<sha> suffix of the full describe output varies
+          # in length with the local object count of each runner workspace.
+          VERSION_TAG=$(git describe --tags --always --abbrev=0)
+          {
+            echo "gh_ref=$GH_REF"
+            echo "ref_slug=$REF_SLUG"
+            echo "bundle_version=$BUNDLE_VERSION"
+            echo "sha=$SHA"
+            echo "build_key=sha-${SHA}-${VERSION_TAG}"
+            echo "commit_title=$(git log -1 --pretty=%s)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # The image set is treated as a single block: if either image is missing,
+      # the whole set is (re)built. `force` bypasses this check entirely.
+      - name: Check if this image set is already built
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          BUILD_KEY: ${{ steps.vars.outputs.build_key }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "exists=false" >> $GITHUB_OUTPUT
+            {
+              echo "### 🔁 Image set build forced"
+              echo ""
+              echo "\`force: true\` — skipping the registry check."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          exists_web=$(docker manifest inspect "${DOCKER_REGISTRY}/dbgweb:${BUILD_KEY}" > /dev/null 2>&1 && echo "true" || echo "false")
+          exists_mcp=$(docker manifest inspect "${DOCKER_REGISTRY}/dbgmcp:${BUILD_KEY}" > /dev/null 2>&1 && echo "true" || echo "false")
+
+          if [ "$exists_web" = "true" ] && [ "$exists_mcp" = "true" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            {
+              echo "### ⏭️ Image set build skipped"
+              echo ""
+              echo "The whole set was already built for \`${BUILD_KEY}\` (dbgweb, dbgmcp)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            {
+              echo "### 🏗️ Image set build required"
+              echo ""
+              echo "dbgweb: \`${exists_web}\`, dbgmcp: \`${exists_mcp}\` for \`${BUILD_KEY}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ── 2. One build per image, in parallel, only when needed ──────────────
+  build:
+    name: Build ${{ matrix.image_name }}
+    runs-on: penpot-standar-runner
+    timeout-minutes: 45
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'false'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: web
+            image_name: dbgweb
+          - target: mcp
+            image_name: dbgmcp
+
+    steps:
+      - name: Set common environment variables
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker-${{ github.run_id }}-${{ github.job }}-${{ matrix.target }}" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.gh_ref }}
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # To avoid the "429 Too Many Requests" error when downloading
+      # images from DockerHub for unregistered users.
+      # https://docs.docker.com/docker-hub/usage/
+      - name: Login to DockerHub Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          username: ${{ secrets.PUB_DOCKER_USERNAME }}
+          password: ${{ secrets.PUB_DOCKER_PASSWORD }}
+
+      # The base runtime image is pulled from Docker Hardened Images (dhi.io).
+      - name: Login to Docker Hardened Images registry (base image pull)
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.PUB_DOCKER_USERNAME }}
+          password: ${{ secrets.PUB_DOCKER_PASSWORD }}
+
+      - name: Set up QEMU (stable)
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ secrets.DOCKER_REGISTRY }}/${{ matrix.image_name }}
+          labels: |
+            bundle_version=${{ needs.prepare.outputs.bundle_version }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          # Immutable tag only; branch tags are moved atomically for the
+          # whole image set by the `promote` job.
+          tags: ${{ secrets.DOCKER_REGISTRY }}/${{ matrix.image_name }}:${{ needs.prepare.outputs.build_key }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUNDLE_VERSION=${{ needs.prepare.outputs.bundle_version }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/${{ matrix.image_name }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_REGISTRY }}/${{ matrix.image_name }}:buildcache,mode=max
+
+  # ── 3a. Move the branch tags of ALL images together (fresh build) ──────
+  promote:
+    name: Promote image set
+    runs-on: penpot-standar-runner
+    timeout-minutes: 10
+    needs: [prepare, build]
+
+    steps:
+      - name: Set common environment variables
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker-${{ github.run_id }}-${{ github.job }}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Point branch tags to the new build key
+        env:
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          REF_SLUG: ${{ needs.prepare.outputs.ref_slug }}
+          BUILD_KEY: ${{ needs.prepare.outputs.build_key }}
+        run: |
+          set -e
+          for image in dbgweb dbgmcp; do
+            docker buildx imagetools create \
+              -t "${DOCKER_REGISTRY}/${image}:${REF_SLUG}" \
+              "${DOCKER_REGISTRY}/${image}:${BUILD_KEY}"
+          done
+
+      - name: Write step summary
+        env:
+          REF_SLUG: ${{ needs.prepare.outputs.ref_slug }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_KEY: ${{ needs.prepare.outputs.build_key }}
+          BUNDLE_VERSION: ${{ needs.prepare.outputs.bundle_version }}
+          COMMIT_TITLE: ${{ needs.prepare.outputs.commit_title }}
+        run: |
+          {
+            echo "### ✅ Image set promoted"
+            echo ""
+            echo "- Version: \`${BUNDLE_VERSION}\` (\`git describe --tags --always\`)"
+            echo "- Commit: [\`${SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${SHA}) — ${COMMIT_TITLE}"
+            echo "- Built at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "All \`:${REF_SLUG}\` tags now point to \`${BUILD_KEY}\` (dbgweb, dbgmcp)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 3b. Skip path: make sure THIS ref's tags point to the existing
+  # images (the whole set was already built for this commit).
+  retag:
+    name: Ensure branch tags (already-built set)
+    runs-on: penpot-standar-runner
+    timeout-minutes: 10
+    needs: prepare
+    if: needs.prepare.outputs.exists == 'true'
+
+    steps:
+      - name: Set common environment variables
+        run: |
+          echo "DOCKER_CONFIG=${{ runner.temp }}/.docker-${{ github.run_id }}-${{ github.job }}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to Docker Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ secrets.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Point branch tags to the existing build key
+        env:
+          DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          REF_SLUG: ${{ needs.prepare.outputs.ref_slug }}
+          BUILD_KEY: ${{ needs.prepare.outputs.build_key }}
+        run: |
+          set -e
+          for image in dbgweb dbgmcp; do
+            docker buildx imagetools create \
+              -t "${DOCKER_REGISTRY}/${image}:${REF_SLUG}" \
+              "${DOCKER_REGISTRY}/${image}:${BUILD_KEY}"
+          done
+
+      - name: Write step summary
+        env:
+          REF_SLUG: ${{ needs.prepare.outputs.ref_slug }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_KEY: ${{ needs.prepare.outputs.build_key }}
+          BUNDLE_VERSION: ${{ needs.prepare.outputs.bundle_version }}
+          COMMIT_TITLE: ${{ needs.prepare.outputs.commit_title }}
+        run: |
+          {
+            echo "### ✅ Image set already built (branch tags ensured)"
+            echo ""
+            echo "- Version: \`${BUNDLE_VERSION}\` (\`git describe --tags --always\`)"
+            echo "- Commit: [\`${SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${SHA}) — ${COMMIT_TITLE}"
+            echo "- Checked at: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "All \`:${REF_SLUG}\` tags now point to \`${BUILD_KEY}\` (dbgweb, dbgmcp)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 4. Single failure notification for the whole workflow ─────────────
+  notify:
+    name: Notify failure
+    runs-on: penpot-standar-runner
+    timeout-minutes: 5
+    needs: [prepare, build, promote, retag]
+    if: failure()
+
+    steps:
+      - name: Notify Mattermost
+        uses: mattermost/action-mattermost-notify@ae31bb6f9e26a54336e79696f108a2c91cf55b4e # v2.1.0
+        with:
+          MATTERMOST_WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK }}
+          MATTERMOST_CHANNEL: bot-alerts-cicd
+          TEXT: |
+            ❌ 🐳 *[PENPOT DBG] Error building/promoting the dbgweb/dbgmcp docker image set.*
+            📄 Triggered from ref: `${{ needs.prepare.outputs.gh_ref || inputs.gh_ref }}`
+            📦 Bundle: `${{ needs.prepare.outputs.bundle_version || 'n/a' }}`
+            🔗 Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            @infra
