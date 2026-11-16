@@ -23,15 +23,21 @@ ENV LANG=C.UTF-8 \
     TZ=Etc/UTC \
     ERROR_ANALYSIS_DB=/opt/data/analysis.sqlite
 
+# The DHI base image ships neither `passwd` (groupadd/useradd) nor `login`
+# (nologin), so install `passwd` and fall back to /bin/false for the shell.
 RUN set -ex; \
     apt-get -qq update; \
     apt-get -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" dist-upgrade; \
-    apt-get clean; \
-    rm -rf /var/lib/apt/lists/*; \
+    apt-get -qq install -y --no-install-recommends passwd; \
+    export PATH="/usr/sbin:$PATH"; \
+    shell=/usr/sbin/nologin; \
+    [ -x "$shell" ] || shell=/bin/false; \
     groupadd -g 1001 penpot; \
-    useradd -M -u 1001 -g 1001 -s /usr/sbin/nologin -d /opt/data penpot; \
+    useradd -M -u 1001 -g 1001 -s "$shell" -d /opt/data penpot; \
     mkdir -p /opt/data; \
-    chown -R penpot:penpot /opt/data
+    chown -R penpot:penpot /opt/data; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/error-analysis /opt/error-analysis
 
